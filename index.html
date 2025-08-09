@@ -1,0 +1,173 @@
+<!doctype html>
+
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>住所の方角チェッカー</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body{font-family:system-ui, -apple-system, "Hiragino Kaku Gothic ProN", "Yu Gothic", Roboto, "Noto Sans JP", sans-serif; margin:0; padding:0;}
+    header{padding:12px; background:#0b69ff; color:white}
+    .container{max-width:980px; margin:18px auto; padding:12px}
+    #map{height:420px; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,0.12)}
+    .controls{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px}
+    input[type=text]{flex:1; padding:10px; border-radius:6px; border:1px solid #ddd}
+    button{padding:10px 14px; border-radius:6px; border:0; background:#0b69ff; color:#fff}
+    .info{margin-top:12px; padding:12px; background:#f7f9ff; border-radius:6px}
+    .compass{width:120px;height:120px;border-radius:50%;border:4px solid #0b69ff;display:flex;align-items:center;justify-content:center;margin-right:12px}
+    .compass-inner{transform:rotate(0deg);}
+    .row{display:flex;align-items:center}
+    small{color:#666}
+    footer{font-size:12px;color:#666;padding:12px;text-align:center}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>住所の方角チェッカー</h1>
+  </header>
+  <main class="container">
+    <p>自分の現在地（または任意の座標）から、指定した住所の方角と距離を確認できます。住所はジオコーディングで緯度経度に変換します（OpenStreetMapのNominatimを使用）。</p><div class="controls">
+  <input id="address" type="text" placeholder="例: 東京都千代田区千代田1-1" />
+  <button id="locateBtn">現在地を取得</button>
+  <button id="checkBtn">方角を調べる</button>
+</div>
+
+<div id="map"></div>
+
+<div class="info row" id="result" style="display:none">
+  <div class="compass" id="compass"><div class="compass-inner" id="compassInner">▲</div></div>
+  <div>
+    <div><strong>方位:</strong> <span id="directionText"></span> (<span id="deg"></span>°)</div>
+    <div><strong>距離:</strong> <span id="distance"></span> km</div>
+    <div><strong>住所（ジオコーディング結果）:</strong> <span id="displayAddress"></span></div>
+    <small>※ 公共のジオコーディングAPIを使用しています。大量リクエストは避けてください。</small>
+  </div>
+</div>
+
+<div style="margin-top:12px">
+  <label>現在地（手動入力）: 緯度 <input id="latManual" placeholder="例:35.685175" style="width:120px;padding:6px;margin-right:6px"/> 経度 <input id="lngManual" placeholder="例:139.7528" style="width:120px;padding:6px"/></label>
+  <button id="useManual">手動位置を反映</button>
+</div>
+
+<footer>作成: 簡易デモ — 追加機能や外観変更希望あれば教えて</footer>
+
+  </main>  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>  <script>
+    // ヘルパー: 距離(km) と 方位角(度) 計算
+    function toRad(d){return d*Math.PI/180}
+    function toDeg(r){return r*180/Math.PI}
+    function haversine(lat1,lng1,lat2,lng2){
+      const R = 6371; // km
+      const dLat = toRad(lat2-lat1);
+      const dLon = toRad(lng2-lng1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return R*c;
+    }
+    function bearing(lat1,lng1,lat2,lng2){
+      const y = Math.sin(toRad(lng2-lng1))*Math.cos(toRad(lat2));
+      const x = Math.cos(toRad(lat1))*Math.sin(toRad(lat2)) - Math.sin(toRad(lat1))*Math.cos(toRad(lat2))*Math.cos(toRad(lng2-lng1));
+      let brng = toDeg(Math.atan2(y,x));
+      brng = (brng+360)%360;
+      return brng; // 0 = 北, 90 = 東
+    }
+    function degToCardinal(deg){
+      const dirs = ['北','北北東','北東','東北東','東','東南東','南東','南南東','南','南南西','南西','西南西','西','西北西','北西','北北西'];
+      const idx = Math.round(deg/22.5) % 16;
+      return dirs[idx];
+    }
+
+    // Leaflet 初期化
+    const map = L.map('map').setView([35.68,139.76], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      maxZoom:19, attribution:'© OpenStreetMap contributors'
+    }).addTo(map);
+
+    let userMarker = null;
+    let targetMarker = null;
+    let arrowLine = null;
+    let userPos = null; // {lat, lng}
+
+    function setUserPosition(lat,lng,label){
+      userPos = {lat:lat, lng:lng};
+      if(userMarker) map.removeLayer(userMarker);
+      userMarker = L.marker([lat,lng]).addTo(map).bindPopup(label||'現在地').openPopup();
+      map.panTo([lat,lng]);
+    }
+
+    document.getElementById('locateBtn').addEventListener('click', ()=>{
+      if(!navigator.geolocation){alert('このブラウザでは位置情報が取得できません');return}
+      navigator.geolocation.getCurrentPosition((pos)=>{
+        setUserPosition(pos.coords.latitude, pos.coords.longitude, '現在地（端末の位置情報）');
+      }, (err)=>{alert('位置情報の取得に失敗しました: '+err.message)});
+    });
+
+    document.getElementById('useManual').addEventListener('click', ()=>{
+      const lat = parseFloat(document.getElementById('latManual').value);
+      const lng = parseFloat(document.getElementById('lngManual').value);
+      if(Number.isFinite(lat) && Number.isFinite(lng)){
+        setUserPosition(lat,lng,'手動設定位置');
+      } else alert('緯度経度を正しく入力してください');
+    });
+
+    async function geocodeAddress(q){
+      // Nominatim (OpenStreetMap) を使用。商用・高頻度は避けてください。
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1&addressdetails=1`;
+      const res = await fetch(url, {headers: {'Accept-Language':'ja'}});
+      const data = await res.json();
+      if(data && data.length>0) return data[0];
+      return null;
+    }
+
+    document.getElementById('checkBtn').addEventListener('click', async ()=>{
+      const addr = document.getElementById('address').value.trim();
+      if(!addr){alert('住所を入力してください'); return}
+      const geo = await geocodeAddress(addr);
+      if(!geo){alert('住所が見つかりませんでした'); return}
+      const tlat = parseFloat(geo.lat), tlng = parseFloat(geo.lon);
+
+      if(targetMarker) map.removeLayer(targetMarker);
+      if(arrowLine) map.removeLayer(arrowLine);
+      targetMarker = L.marker([tlat,tlng]).addTo(map).bindPopup(geo.display_name).openPopup();
+
+      if(!userPos){
+        // まだ現在地が未設定なら手動で聞くか、警告
+        const ok = confirm('現在地が未設定です。端末の位置情報を使いますか？（キャンセルで手動で設定）');
+        if(ok){
+          if(!navigator.geolocation){alert('位置情報が使えません'); return}
+          navigator.geolocation.getCurrentPosition((pos)=>{ setUserPosition(pos.coords.latitude,pos.coords.longitude,'現在地（端末）'); computeAndShow(pos.coords.latitude,pos.coords.longitude,tlat,tlng,geo.display_name); }, (err)=>{alert('位置情報取得に失敗しました: '+err.message)});
+          return;
+        } else {alert('手動で現在地を設定してください（画面下の入力欄）'); return}
+      }
+
+      computeAndShow(userPos.lat, userPos.lng, tlat, tlng, geo.display_name);
+    });
+
+    function computeAndShow(lat1,lng1,lat2,lng2,displayName){
+      const dist = haversine(lat1,lng1,lat2,lng2);
+      const br = bearing(lat1,lng1,lat2,lng2);
+      // 線を引く
+      arrowLine = L.polyline([[lat1,lng1],[lat2,lng2]], {color:'#0b69ff'}).addTo(map);
+      // 表示を更新
+      document.getElementById('result').style.display = 'flex';
+      document.getElementById('deg').textContent = br.toFixed(1);
+      document.getElementById('directionText').textContent = degToCardinal(br) + '（' + br.toFixed(1) + '°）';
+      document.getElementById('distance').textContent = dist.toFixed(3);
+      document.getElementById('displayAddress').textContent = displayName;
+
+      // コンパス回転: 北が0°、要素は回転で矢印を合わせる（CSS内の▲）
+      const compassInner = document.getElementById('compassInner');
+      compassInner.style.transform = `rotate(${br}deg)`;
+
+      // マップを収める
+      const bounds = L.latLngBounds([[lat1,lng1],[lat2,lng2]]).pad(0.3);
+      map.fitBounds(bounds);
+    }
+
+    // マップクリックで手動に現在地をセットするショートカット
+    map.on('click', function(e){
+      if(confirm('ここを現在地に設定しますか？')) setUserPosition(e.latlng.lat, e.latlng.lng, '現在地（マップで指定）');
+    });
+
+  </script></body>
+</html>
